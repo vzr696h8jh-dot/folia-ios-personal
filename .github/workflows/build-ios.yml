@@ -1,0 +1,74 @@
+name: Build personal Folia iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - folia-ios-source.zip
+      - .github/workflows/build-ios.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: folia-personal-ios
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack reviewable source
+        run: unzip -q folia-ios-source.zip -d source
+      - name: Run login regression tests
+        run: bash source/regression/run-tests.sh
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Archive unsigned iPhone app
+        working-directory: source/ios-native
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          xcodebuild -project FoliaNative.xcodeproj -scheme FoliaNative \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/out.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" \
+            > build.log 2>&1 || { tail -n 100 build.log; exit 1; }
+          mkdir -p Payload
+          ditto out.xcarchive/Products/Applications/FoliaNative.app Payload/FoliaNative.app
+          zip -qr ../../Folia-personal-unsigned.ipa Payload
+      - name: Record checksums
+        run: shasum -a 256 Folia-personal-unsigned.ipa folia-ios-source.zip > SHA256SUMS.txt
+      - name: Upload installable package and matching source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folia-personal-unsigned
+          path: |
+            Folia-personal-unsigned.ipa
+            folia-ios-source.zip
+            SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Personal unsigned iOS build based on zzqwq1/Folia.
+          Source and AGPL-3.0 license are included in folia-ios-source.zip.
+          The build must pass mocked HTTP/session regression tests before publishing.
+          Requires personal signing to install. Real account login and playback require device verification.
+          NOTES
+          gh release create "personal-${GITHUB_RUN_NUMBER}" \
+            Folia-personal-unsigned.ipa folia-ios-source.zip SHA256SUMS.txt \
+            --title "Folia iOS personal build ${GITHUB_RUN_NUMBER}" \
+            --notes-file release-notes.md --prerelease
+      - name: Save diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: source/ios-native/build.log
+          if-no-files-found: ignore
